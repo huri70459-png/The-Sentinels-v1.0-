@@ -1352,6 +1352,95 @@ def run_self_test() -> int:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# ============================================================================
+# STAGE 3: FAIL-CLOSED PATH/DIFF GUARD + STRUCTURAL CHECKS (client boundary)
+# Governs configured client tools, not every possible way to modify files.
+# ============================================================================
+
+def stage3_check_path(
+    relative_path: str, allowed_globs: List[str], protected_globs: List[str]
+) -> Dict[str, Any]:
+    """Deterministic path guard. Fail closed on traversal, protected, or unclassified."""
+    clean = (relative_path or "").strip().lstrip("/").replace("\\", "/")
+    if not clean or ".." in Path(clean).parts or clean.startswith(".git"):
+        return {"allowed": False, "violation": "PATH_TRAVERSAL", "error": f"BLOCKED: illegal path '{relative_path}'."}
+    for pat in protected_globs or []:
+        if fnmatch.fnmatch(clean, pat):
+            return {"allowed": False, "violation": "PROTECTED_PATH", "error": f"BLOCKED: '{clean}' matches protected glob '{pat}'."}
+    # Unclassifiable change fails closed: bare name with no extension and no directory
+    if "/" not in clean and "." not in Path(clean).name:
+        return {"allowed": False, "violation": "UNCLASSIFIED_PATH", "error": f"BLOCKED: unclassifiable path '{clean}' fails closed."}
+    if not any(fnmatch.fnmatch(clean, pat) for pat in (allowed_globs or [])):
+        return {"allowed": False, "violation": "SCOPE_ALLOWLIST_VIOLATION", "error": f"BLOCKED: '{clean}' outside allowed globs {allowed_globs}."}
+    return {"allowed": True, "path": clean}
+
+
+def stage3_check_diff(
+    changed_files: List[str], total_changed_lines: int, max_files: int, max_changed_lines: int
+) -> Dict[str, Any]:
+    """Budget guard over the complete change set, including deletes/renames."""
+    files = list(changed_files or [])
+    if len(files) > int(max_files) or int(total_changed_lines) > int(max_changed_lines):
+        return {
+            "allowed": False,
+            "violation": "SCOPE_BUDGET_EXCEEDED",
+            "error": f"BLOCKED: {len(files)}/{max_files} files, {total_changed_lines}/{max_changed_lines} lines (max_files/max_changed_lines exceeded).",
+        }
+    return {"allowed": True, "files": files, "lines": int(total_changed_lines)}
+
+
+def _py_signatures(source: str) -> Dict[str, tuple]:
+    tree = ast.parse(source)
+    sigs: Dict[str, tuple] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+            args = tuple(a.arg for a in node.args.args)
+            sigs[node.name] = args
+    return sigs
+
+
+def stage3_check_py_signature(file_path: str, old_content: str, new_content: str) -> Dict[str, Any]:
+    """Language-aware check (Python only): public function signatures must not change."""
+    if not file_path.endswith(".py"):
+        return {"allowed": True, "skipped": "non-python enforced at path/diff level"}
+    try:
+        old_sigs = _py_signatures(old_content or "")
+        new_sigs = _py_signatures(new_content or "")
+    except SyntaxError as exc:
+        return {"allowed": False, "violation": "AST_SYNTAX_ERROR", "error": f"BLOCKED: {exc}"}
+    for name, old_args in old_sigs.items():
+        if name in new_sigs and new_sigs[name] != old_args:
+            return {
+                "allowed": False,
+                "violation": "SIGNATURE_CHANGED",
+                "error": f"BLOCKED: public function '{name}{old_args}' signature changed to '{new_sigs[name]}' without authorization.",
+            }
+    return {"allowed": True}
+
+
+@mcp.tool()
+def sentinel_guard_check(
+    run_id: str,
+    changed_files: List[str],
+    total_changed_lines: int,
+    protected_globs: Optional[List[str]] = None,
+) -> str:
+    """Stage 3 deterministic guard: allow-list + protected + budget over full change set."""
+    _, _, brain = get_brain()
+    task = brain.get_task(run_id)
+    allowed_globs: List[str] = json.loads(task["allowed_globs_json"])
+    for f in changed_files or []:
+        pr = stage3_check_path(f, allowed_globs, protected_globs or [])
+        if not pr["allowed"]:
+            brain.record_violation(run_id, pr.get("violation", "GUARD"), pr["error"], {"file": f})
+            return json.dumps({"allowed": False, **pr}, indent=2)
+    dr = stage3_check_diff(changed_files or [], total_changed_lines, task["max_files"], task["max_changed_lines"])
+    if not dr["allowed"]:
+        brain.record_violation(run_id, "SCOPE_BUDGET_EXCEEDED", dr["error"], dr)
+        return json.dumps({"allowed": False, **dr}, indent=2)
+    return json.dumps({"allowed": True, "run_id": run_id, "files": changed_files}, indent=2)
+
+
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(run_self_test())
