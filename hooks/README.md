@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/Python314/python.exe hooks/sentinel_pretooluse.py",
+            "command": "python3 hooks/sentinel_pretooluse.py",
             "env": {
               "SENTINEL_WORKTREE": "<absolute worktree path from sentinel_init_task>",
               "SENTINEL_ALLOWED": "src/*.py,src/*.html"
