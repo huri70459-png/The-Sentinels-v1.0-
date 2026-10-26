@@ -61,4 +61,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # crash must fail closed, never fail open
+        print(f"Sentinel BLOCKED: hook crash fails closed ({exc})", file=sys.stderr)
+        sys.exit(2)

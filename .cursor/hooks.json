@@ -1,0 +1,1 @@
+{"hooks":{"preToolUse":[{"command":"C:/Python314/python.exe hooks/sentinel_pretooluse.py","failClosed":true,"matcher":"Write|Edit|apply_patch|multiedit","timeoutMs":8000},{"command":"C:/Python314/python.exe hooks/sentinel_pretooluse.py","failClosed":true,"matcher":"Bash|Shell|exec","timeoutMs":8000}]},"version":1}
