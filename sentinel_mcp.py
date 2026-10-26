@@ -1355,12 +1355,23 @@ def run_self_test() -> int:
 # ============================================================================
 # STAGE 3: FAIL-CLOSED PATH/DIFF GUARD + STRUCTURAL CHECKS (client boundary)
 # Governs configured client tools, not every possible way to modify files.
+# Policy logic lives in src/sentinels/policy/; these shims preserve the MCP API.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+    from sentinels.policy.path_guard import check_path as _svc_check_path
+    from sentinels.policy.diff_guard import check_diff as _svc_check_diff
+    from sentinels.policy.signature_guard import check_py_signature as _svc_check_sig
+    _POLICY_SVC = True
+except Exception:
+    _POLICY_SVC = False
 # ============================================================================
 
 def stage3_check_path(
     relative_path: str, allowed_globs: List[str], protected_globs: List[str]
 ) -> Dict[str, Any]:
     """Deterministic path guard. Fail closed on traversal, protected, or unclassified."""
+    if _POLICY_SVC:
+        return _svc_check_path(relative_path, allowed_globs, protected_globs)
     clean = (relative_path or "").strip().lstrip("/").replace("\\", "/")
     if not clean or ".." in Path(clean).parts or clean.startswith(".git"):
         return {"allowed": False, "violation": "PATH_TRAVERSAL", "error": f"BLOCKED: illegal path '{relative_path}'."}
@@ -1379,6 +1390,8 @@ def stage3_check_diff(
     changed_files: List[str], total_changed_lines: int, max_files: int, max_changed_lines: int
 ) -> Dict[str, Any]:
     """Budget guard over the complete change set, including deletes/renames."""
+    if _POLICY_SVC:
+        return _svc_check_diff(changed_files or [], total_changed_lines, max_files, max_changed_lines)
     files = list(changed_files or [])
     if len(files) > int(max_files) or int(total_changed_lines) > int(max_changed_lines):
         return {
@@ -1401,6 +1414,8 @@ def _py_signatures(source: str) -> Dict[str, tuple]:
 
 def stage3_check_py_signature(file_path: str, old_content: str, new_content: str) -> Dict[str, Any]:
     """Language-aware check (Python only): public function signatures must not change."""
+    if _POLICY_SVC:
+        return _svc_check_sig(file_path, old_content, new_content)
     if not file_path.endswith(".py"):
         return {"allowed": True, "skipped": "non-python enforced at path/diff level"}
     try:
